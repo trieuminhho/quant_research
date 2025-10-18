@@ -86,70 +86,29 @@ def show():
         loader = DataLoader()
         validator = DataValidator()
         
+        # Define available timeframes
+        TIMEFRAMES = ['15m', '30m', '1h', '4h', '12h', '1d', '1w', '1M']
+        
         # Get all S&P 500 tickers
         ingestion = DataIngestion()
         all_sp500_tickers = ingestion.get_sp500_tickers()
         
-        # Get downloaded tickers with metadata
-        downloaded_tickers = loader.get_available_tickers()
+        # Get downloaded tickers for each timeframe
+        available_by_timeframe = loader.get_available_tickers_by_timeframe()
         
-        # Build status table with validation
+        # Build status table with validation and timeframe columns
         ticker_status = []
         for ticker in all_sp500_tickers:
             status = {
                 'ticker': ticker,
-                'downloaded': ticker in downloaded_tickers,
-                'file_size': None,
-                'records': None,
-                'date_range': None,
-                'last_updated': None,
-                'validation_status': '❌'  # Default: not downloaded
+                'downloaded': False,  # Will be True if ANY timeframe is downloaded
             }
             
-            if ticker in downloaded_tickers:
-                try:
-                    from pathlib import Path
-                    filepath = Path("data/raw/ohlcv") / f"{ticker}.csv"
-                    if filepath.exists():
-                        # File size
-                        size_bytes = filepath.stat().st_size
-                        if size_bytes > 1024*1024:
-                            status['file_size'] = f"{size_bytes/(1024*1024):.2f} MB"
-                        else:
-                            status['file_size'] = f"{size_bytes/1024:.2f} KB"
-                        
-                        # Last modified
-                        mtime = filepath.stat().st_mtime
-                        status['last_updated'] = datetime.fromtimestamp(mtime).strftime('%Y-%m-%d %H:%M')
-                        
-                        # Load data for records and date range
-                        data = loader.load_ticker_ohlcv(ticker)
-                        if data is not None:
-                            status['records'] = len(data)
-                            status['date_range'] = f"{data.index[0].strftime('%Y-%m-%d')} to {data.index[-1].strftime('%Y-%m-%d')}"
-                            
-                            # Check if we have validation results in session state
-                            if ticker in st.session_state.dm_validation_results:
-                                val_result = st.session_state.dm_validation_results[ticker]
-                                if val_result.get('is_valid'):
-                                    quality = val_result.get('data_quality', 'UNKNOWN')
-                                    if quality == 'EXCELLENT':
-                                        status['validation_status'] = '✅'
-                                    elif quality == 'GOOD':
-                                        status['validation_status'] = '✅'
-                                    elif quality == 'ACCEPTABLE':
-                                        status['validation_status'] = '⚠️'
-                                    else:
-                                        status['validation_status'] = '❌'
-                                else:
-                                    status['validation_status'] = '❌'
-                            else:
-                                status['validation_status'] = '➖'  # Not yet validated
-                        else:
-                            status['validation_status'] = '❌'
-                except Exception as e:
-                    logger.error(f"Error processing {ticker}: {e}")
-                    status['validation_status'] = '❌'
+            # Add columns for each timeframe
+            for tf in TIMEFRAMES:
+                status[f'tf_{tf}'] = '✅' if ticker in available_by_timeframe.get(tf, []) else '❌'
+                if ticker in available_by_timeframe.get(tf, []):
+                    status['downloaded'] = True
             
             ticker_status.append(status)
         
@@ -163,13 +122,14 @@ def show():
     col1, col2, col3 = st.columns(3)
     
     downloaded_count = status_df['downloaded'].sum()
-    total_records = sum(status_df['records'].dropna())
+    # Count total downloaded files across all timeframes
+    total_files = sum(1 for tf in TIMEFRAMES for ticker_list in [available_by_timeframe.get(tf, [])] for _ in ticker_list)
     universe_size = len(status_df)
     
     with col1:
         st.metric("📥 Downloaded", f"{downloaded_count}/{universe_size}")
     with col2:
-        st.metric("📊 Total Records", f"{total_records:,}")
+        st.metric("� Total Files", f"{total_files}")
     with col3:
         universe_option = st.selectbox("🎯 Universe", ["S&P 500"], key="universe_select")
     
@@ -190,7 +150,7 @@ def show():
     with col2:
         sort_option = st.selectbox(
             "📊 Sort",
-            ["Ticker (A-Z)", "Ticker (Z-A)", "Records (High-Low)", "Last Updated"],
+            ["Ticker (A-Z)", "Ticker (Z-A)"],
             key="sort_select"
         )
     
@@ -237,10 +197,6 @@ def show():
         filtered_df = filtered_df.sort_values('ticker', ascending=True)
     elif sort_option == "Ticker (Z-A)":
         filtered_df = filtered_df.sort_values('ticker', ascending=False)
-    elif sort_option == "Records (High-Low)":
-        filtered_df = filtered_df.sort_values('records', ascending=False, na_position='last')
-    elif sort_option == "Last Updated":
-        filtered_df = filtered_df.sort_values('last_updated', ascending=False, na_position='last')
     
     # Handle bulk selection actions after filtering
     if bulk_all_clicked:
@@ -289,23 +245,26 @@ def show():
     
     # Interactive table with checkboxes
     display_df = filtered_df.copy()
+    # ALWAYS use session state as source of truth for checkbox state
     display_df['select'] = display_df['ticker'].isin(st.session_state.dm_selected_tickers)
     
-    # Add download status column with checkmarks
-    display_df['download_status'] = display_df['downloaded'].apply(lambda x: '✅' if x else '❌')
-    
-    # Reorder columns to include download status and validation status
-    table_columns = ['select', 'ticker', 'download_status', 'validation_status', 'records', 'file_size', 'date_range', 'last_updated']
+    # Reorder columns to include timeframe status
+    table_columns = ['select', 'ticker', 'tf_1d', 'tf_1h', 'tf_15m', 'tf_30m', 'tf_4h', 'tf_1w', 'tf_1M']
     display_df = display_df[table_columns]
-    display_df.columns = ['Select', 'Ticker', '📥 Downloaded', '✅ Verified', 'Records', 'Size', 'Date Range', 'Last Updated']
+    display_df.columns = ['Select', 'Ticker', '1d', '1h', '15m', '30m', '4h', '1w', '1M']
     
-    # Use a stable key based on filter to persist checkbox state
-    editor_key = f"stock_editor_{filter_option}_{sort_option}"
+    # Use a completely stable key - don't include filter/sort to maintain state
+    editor_key = "stock_editor_main"
+    
+    # Column configurations for timeframe columns
+    timeframe_col_config = {}
+    for tf in ['1d', '1h', '15m', '30m', '4h', '1w', '1M']:
+        timeframe_col_config[tf] = st.column_config.TextColumn(tf, width='small')
     
     # Interactive table
     edited_df = st.data_editor(
         display_df,
-        disabled=['Ticker', '📥 Downloaded', '✅ Verified', 'Records', 'Size', 'Date Range', 'Last Updated'],
+        disabled=['Ticker', '1d', '1h', '15m', '30m', '4h', '1w', '1M'],
         hide_index=True,
         use_container_width=True,
         height=400,
@@ -313,27 +272,26 @@ def show():
         column_config={
             'Select': st.column_config.CheckboxColumn('Select', default=False, width='small'),
             'Ticker': st.column_config.TextColumn('Ticker', width='small'),
-            '📥 Downloaded': st.column_config.TextColumn('📥 Downloaded', width='small'),
-            '✅ Verified': st.column_config.TextColumn('✅ Verified', width='small'),
-            'Records': st.column_config.NumberColumn('Records', format='%d', width='small'),
-            'Size': st.column_config.TextColumn('Size', width='small'),
-            'Date Range': st.column_config.TextColumn('Date Range', width='medium'),
-            'Last Updated': st.column_config.TextColumn('Last Updated', width='medium')
+            **timeframe_col_config
         }
     )
     
     # Update selection from table - synchronize session state with editor state
     new_selection = edited_df[edited_df['Select']]['Ticker'].tolist()
-    # Always update to keep in sync, but don't force rerun
+    # Update session state with the new selection from the editor
+    # This captures user clicks on the checkboxes in the table
     st.session_state.dm_selected_tickers = new_selection
     
     st.write("---")
     
     # ====== ACTIONS: DOWNLOAD, VALIDATE, DELETE (No title, directly under table) =====
+    # Use session state for selected tickers (persists across reruns from checkbox clicks)
     selected_tickers = st.session_state.dm_selected_tickers
     selected_count = len(selected_tickers)
-    selected_downloaded = [t for t in selected_tickers if t in downloaded_tickers]
-    selected_not_downloaded = [t for t in selected_tickers if t not in downloaded_tickers]
+    
+    # Get list of downloaded tickers (checking 1d timeframe as reference)
+    downloaded_tickers_1d = available_by_timeframe.get('1d', [])
+    selected_downloaded = [t for t in selected_tickers if t in downloaded_tickers_1d]
 
     # Action buttons in tabs - reordered: Download, Validate, Delete
     tab1, tab2, tab3 = st.tabs(["📥 Download", "✅ Validate", "🗑️ Delete"])
@@ -341,18 +299,48 @@ def show():
     # TAB 1: DOWNLOAD
     with tab1:
         st.write("**Download Selected Data**")
+        
+        # Timeframe selector
+        st.write("**Select Timeframes to Download:**")
+        tf_cols = st.columns(4)
+        download_timeframes = []
+        with tf_cols[0]:
+            if st.checkbox("📅 1 Day", value=True, key="tf_1d"):
+                download_timeframes.append('1d')
+            if st.checkbox("⏱️ 1 Hour", value=False, key="tf_1h"):
+                download_timeframes.append('1h')
+        with tf_cols[1]:
+            if st.checkbox("⏱️ 15 Min", value=False, key="tf_15m"):
+                download_timeframes.append('15m')
+            if st.checkbox("⏱️ 30 Min", value=False, key="tf_30m"):
+                download_timeframes.append('30m')
+        with tf_cols[2]:
+            if st.checkbox("⏱️ 4 Hour", value=False, key="tf_4h"):
+                download_timeframes.append('4h')
+            if st.checkbox("📊 1 Week", value=False, key="tf_1w"):
+                download_timeframes.append('1w')
+        with tf_cols[3]:
+            if st.checkbox("📊 1 Month", value=False, key="tf_1M"):
+                download_timeframes.append('1M')
+        
+        # Calculate download jobs
+        download_job_count = len(selected_tickers) * len(download_timeframes)
+        
+        # Check which tickers need downloading for selected timeframes
+        missing_combos = []
+        for ticker in selected_tickers:
+            for tf in download_timeframes:
+                if ticker not in available_by_timeframe.get(tf, []):
+                    missing_combos.append((ticker, tf))
 
-        force_redownload = False
-        if selected_count and selected_downloaded:
-            force_redownload = st.checkbox(
-                "Force re-download for already downloaded tickers",
-                value=False,
-                key="dm_force_redownload",
-                help="Re-fetch data and overwrite existing CSVs for the selected tickers."
-            )
-
-        download_targets = selected_tickers if force_redownload else selected_not_downloaded
-        download_disabled = len(download_targets) == 0
+        force_redownload = st.checkbox(
+            "Force re-download existing data",
+            value=False,
+            key="dm_force_redownload",
+            help="Re-fetch data and overwrite existing CSVs for the selected tickers and timeframes."
+        )
+        
+        download_disabled = (selected_count == 0 or len(download_timeframes) == 0)
 
         dl_col1, dl_col2 = st.columns([2, 1])
         with dl_col1:
@@ -377,7 +365,7 @@ def show():
         else:
             start_date = datetime(2010, 1, 1)
 
-        download_label = f"📥 Download Now ({len(download_targets)} stocks)" if download_targets else "📥 Download Now"
+        download_label = f"📥 Download Now ({download_job_count} jobs)" if download_job_count else "📥 Download Now"
         
         # Initialize download trigger flag
         if 'dm_download_triggered' not in st.session_state:
@@ -387,7 +375,8 @@ def show():
         def trigger_download():
             st.session_state.dm_download_triggered = True
             st.session_state.dm_download_params = {
-                'download_targets': download_targets.copy(),
+                'selected_tickers': selected_tickers.copy(),
+                'download_timeframes': download_timeframes.copy(),
                 'start_date': start_date,
                 'end_date': end_date,
                 'max_workers': max_workers,
@@ -406,8 +395,10 @@ def show():
         if download_disabled:
             if selected_count == 0:
                 st.caption("Select tickers from the table above to enable downloads.")
-            elif not force_redownload and not selected_not_downloaded:
-                st.caption("All selected tickers already have data. Toggle force re-download to refresh files.")
+            elif len(download_timeframes) == 0:
+                st.caption("Select at least one timeframe to download.")
+        elif not force_redownload and not missing_combos:
+            st.info("💡 All selected tickers already have data for the chosen timeframe(s). Toggle 'Force re-download' to refresh files.")
 
         # Check if download was triggered
         if st.session_state.dm_download_triggered:
@@ -415,68 +406,54 @@ def show():
             
             # Get stored parameters
             params = st.session_state.get('dm_download_params', {})
-            download_targets = params.get('download_targets', [])
+            selected_tickers = params.get('selected_tickers', [])
+            download_timeframes = params.get('download_timeframes', [])
             start_date = params.get('start_date')
             end_date = params.get('end_date')
             max_workers = params.get('max_workers', 5)
             force_redownload = params.get('force_redownload', False)
-            with st.spinner(f"Downloading {len(download_targets)} stocks..."):
+            
+            download_job_count = len(selected_tickers) * len(download_timeframes)
+            
+            with st.spinner(f"Downloading {download_job_count} job(s) across {len(download_timeframes)} timeframe(s)..."):
                 try:
                     ingestion = DataIngestion(
                         start_date=start_date.strftime('%Y-%m-%d'),
-                        end_date=end_date.strftime('%Y-%m-%d')
+                        end_date=end_date.strftime('%Y-%m-%d'),
+                        timeframes=download_timeframes
                     )
 
                     progress_bar = st.progress(0)
                     status_text = st.empty()
 
                     status_text.text("⏳ Downloading data...")
-                    results = ingestion.download_all_tickers(download_targets, max_workers=max_workers)
-
-                    progress_bar.progress(50)
-
-                    successful = sum(1 for v in results.values() if v)
-                    failed = len(results) - successful
-                    successful_tickers = [k for k, v in results.items() if v]
-
-                    validation_results = {}
-                    if successful_tickers:
-                        status_text.text("🔍 Validating downloaded data...")
-                        for i, ticker in enumerate(successful_tickers):
-                            try:
-                                data = loader.load_ticker_ohlcv(ticker)
-                                if data is not None:
-                                    validation_results[ticker] = validator.validate_price_data(ticker, data)
-                                    st.session_state.dm_validation_results[ticker] = validation_results[ticker]
-                                else:
-                                    validation_results[ticker] = {
-                                        'is_valid': False,
-                                        'discrepancies': ["No data available after download"]
-                                    }
-                                    st.session_state.dm_validation_results[ticker] = validation_results[ticker]
-                                progress_bar.progress(50 + int((i + 1) / len(successful_tickers) * 50))
-                            except Exception as e:
-                                validation_results[ticker] = {
-                                    'is_valid': False,
-                                    'discrepancies': [f"Validation error: {e}"]
-                                }
-                                st.session_state.dm_validation_results[ticker] = validation_results[ticker]
-
-                        save_validation_cache(st.session_state.dm_validation_results)
+                    results = ingestion.download_all_tickers(
+                        tickers=selected_tickers,
+                        timeframes=download_timeframes,
+                        max_workers=max_workers,
+                        skip_existing=not force_redownload
+                    )
 
                     progress_bar.progress(100)
                     status_text.empty()
 
+                    # Count successful and failed jobs across all timeframes
+                    total_jobs = sum(len(tf_results) for tf_results in results.values())
+                    successful_jobs = sum(1 for tf_results in results.values() 
+                                        for status in tf_results.values() if status == 'downloaded')
+                    skipped_jobs = sum(1 for tf_results in results.values() 
+                                      for status in tf_results.values() if status == 'skipped')
+                    failed_jobs = total_jobs - successful_jobs - skipped_jobs
+                    
                     # Store results in session state for display at the bottom
                     st.session_state.dm_last_download_results = {
-                        'successful_tickers': successful_tickers,
-                        'validation_results': validation_results,
-                        'failed': failed,
-                        'successful': successful
+                        'results': results,
+                        'total_jobs': total_jobs,
+                        'successful_jobs': successful_jobs,
+                        'skipped_jobs': skipped_jobs,
+                        'failed_jobs': failed_jobs,
+                        'timeframes': download_timeframes
                     }
-                    
-                    st.session_state.dm_selected_tickers = successful_tickers
-                    st.session_state.dm_validation_results.update(validation_results if successful_tickers else {})
                     
                     # Trigger rerun to refresh the table with checkmarks
                     st.rerun()
@@ -641,59 +618,45 @@ def show():
         st.markdown("---")
         st.markdown("### 📊 Last Download Results")
         
-        results = st.session_state.dm_last_download_results
-        successful_tickers = results.get('successful_tickers', [])
-        validation_results = results.get('validation_results', {})
-        failed = results.get('failed', 0)
-        successful = results.get('successful', 0)
+        results_data = st.session_state.dm_last_download_results
+        results = results_data.get('results', {})
+        total_jobs = results_data.get('total_jobs', 0)
+        successful_jobs = results_data.get('successful_jobs', 0)
+        skipped_jobs = results_data.get('skipped_jobs', 0)
+        failed_jobs = results_data.get('failed_jobs', 0)
+        timeframes = results_data.get('timeframes', [])
         
-        if successful_tickers:
-            valid_count = sum(1 for v in validation_results.values() if v.get('is_valid'))
-            issues = {t: r for t, r in validation_results.items() if not r.get('is_valid')}
-
-            if failed == 0 and not issues:
-                st.success(f"✅ Downloaded and validated all {successful} stocks successfully! All data is valid.")
-            elif failed == 0:
-                st.warning(f"⚠️ Downloaded {successful} stocks: {valid_count} valid, {len(issues)} with issues")
-            else:
-                st.warning(f"⚠️ Downloaded {successful} stocks ({valid_count} valid, {len(issues)} with issues), {failed} failed")
-
-            if issues:
-                with st.expander(f"📋 View Detailed Validation Results ({len(issues)} stocks with issues)", expanded=False):
-                    for ticker, result in issues.items():
-                        st.markdown(f"### 🔍 {ticker}")
-                        discrepancies = result.get('discrepancies', [])
-                        if discrepancies:
-                            st.markdown("**❌ Discrepancies:**")
-                            for entry in discrepancies:
-                                st.markdown(f"- {entry}")
-                        else:
-                            st.info("No specific discrepancies reported.")
-
-                        avg_diff = result.get('avg_difference_pct')
-                        if avg_diff is not None:
-                            st.write(f"- Average price difference: {avg_diff:.4f}%")
-                        max_diff = result.get('max_difference_pct')
-                        if max_diff is not None:
-                            st.write(f"- Max price difference: {max_diff:.4f}%")
-                        st.markdown("---")
-
-            with st.expander(f"📊 View All Validation Details ({len(validation_results)} stocks)", expanded=False):
-                for ticker, result in validation_results.items():
-                    is_valid = result.get('is_valid', False)
-                    header_icon = "✅" if is_valid else "❌"
-                    st.markdown(f"### {header_icon} {ticker}")
-                    st.write(f"- Quality: {result.get('data_quality', 'UNKNOWN')}")
-                    st.write(f"- Confidence: {result.get('confidence_score', 0.0):.2f}%")
-
-                    discrepancies = result.get('discrepancies', [])
-                    if discrepancies:
-                        st.write("Discrepancies:")
-                        for entry in discrepancies:
-                            st.markdown(f"  - {entry}")
-                    st.markdown("---")
+        # Summary
+        if failed_jobs == 0 and skipped_jobs == 0:
+            st.success(f"✅ Successfully downloaded all {successful_jobs} job(s) across {len(timeframes)} timeframe(s)!")
+        elif failed_jobs == 0:
+            st.success(f"✅ Downloaded {successful_jobs} job(s), skipped {skipped_jobs} existing")
         else:
-            st.warning("⚠️ Download completed but no files were saved. Please check logs.")
+            st.warning(f"⚠️ Downloaded {successful_jobs} job(s), skipped {skipped_jobs}, failed {failed_jobs}")
+        
+        # Show breakdown by timeframe
+        with st.expander(f"📋 View Details by Timeframe ({len(timeframes)} timeframe(s))", expanded=True):
+            for tf in timeframes:
+                tf_results = results.get(tf, {})
+                tf_downloaded = sum(1 for status in tf_results.values() if status == 'downloaded')
+                tf_skipped = sum(1 for status in tf_results.values() if status == 'skipped')
+                tf_failed = sum(1 for status in tf_results.values() if status == 'failed')
+                
+                st.markdown(f"#### ⏱️ {tf.upper()}")
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.metric("✅ Downloaded", tf_downloaded)
+                with col2:
+                    st.metric("➖ Skipped", tf_skipped)
+                with col3:
+                    st.metric("❌ Failed", tf_failed)
+                
+                # Show failed tickers if any
+                if tf_failed > 0:
+                    failed_tickers = [ticker for ticker, status in tf_results.items() if status == 'failed']
+                    st.warning(f"Failed tickers: {', '.join(failed_tickers)}")
+                
+                st.markdown("---")
         
         # Add button to clear results
         if st.button("🔄 Clear Results", key="clear_download_results"):

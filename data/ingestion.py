@@ -22,19 +22,47 @@ class DataIngestion:
     """
     Handles downloading and storing market data for S&P 500 stocks.
     All data is stored locally in CSV format with organized folder structure.
+    Supports multiple timeframes: 15m, 30m, 1h, 4h, 12h, 1d, 1w, 1M
     """
+    
+    # Mapping of our timeframe notation to yfinance intervals
+    TIMEFRAME_MAP = {
+        '15m': '15m',
+        '30m': '30m',
+        '1h': '1h',
+        '4h': '4h',
+        '12h': '1d',  # yfinance doesn't have 12h, will need custom logic
+        '1d': '1d',
+        '1w': '1wk',
+        '1M': '1mo'
+    }
+    
+    # Maximum history available for each timeframe (yfinance limitations)
+    TIMEFRAME_LIMITS = {
+        '15m': 60,    # days
+        '30m': 60,    # days
+        '1h': 730,    # days (~2 years)
+        '4h': 730,    # days
+        '12h': 730,   # days
+        '1d': 36500,  # days (no practical limit)
+        '1w': 36500,  # days
+        '1M': 36500   # days
+    }
     
     def __init__(self, 
                  output_dir: str = "data/raw/ohlcv",
                  start_date: str = "2010-01-01",
-                 end_date: Optional[str] = None):
+                 end_date: Optional[str] = None,
+                 timeframes: Optional[List[str]] = None):
         """
         Initialize data ingestion.
         
         Args:
-            output_dir: Directory to save CSV files
+            output_dir: Base directory to save CSV files
             start_date: Start date for historical data (YYYY-MM-DD)
             end_date: End date for historical data (YYYY-MM-DD). None = today
+            timeframes: List of timeframes to download (e.g., ['1d', '1h', '15m'])
+                       If None, defaults to ['1d']
         """
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -42,7 +70,15 @@ class DataIngestion:
         self.start_date = start_date
         self.end_date = end_date if end_date else datetime.now().strftime('%Y-%m-%d')
         
-        logger.info(f"DataIngestion initialized: {self.start_date} to {self.end_date}")
+        # Default to daily if not specified
+        self.timeframes = timeframes if timeframes else ['1d']
+        
+        # Create subdirectories for each timeframe
+        for tf in self.timeframes:
+            tf_dir = self.output_dir / tf
+            tf_dir.mkdir(parents=True, exist_ok=True)
+        
+        logger.info(f"DataIngestion initialized: {self.start_date} to {self.end_date} (timeframes: {self.timeframes})")
     
     def get_sp500_tickers(self) -> List[str]:
         """
@@ -89,34 +125,79 @@ class DataIngestion:
     
     def download_ticker_data(self, 
                             ticker: str,
+                            timeframe: str = '1d',
                             retries: int = 3,
                             delay: float = 1.0) -> Optional[pd.DataFrame]:
         """
-        Download historical OHLCV data for a single ticker.
+        Download historical OHLCV data for a single ticker at specified timeframe.
         
         Args:
             ticker: Stock ticker symbol
+            timeframe: Timeframe (15m, 30m, 1h, 4h, 12h, 1d, 1w, 1M)
             retries: Number of retry attempts
             delay: Delay between retries (seconds)
             
         Returns:
             DataFrame with OHLCV data, or None if failed
         """
+        # Validate timeframe
+        if timeframe not in self.TIMEFRAME_MAP:
+            logger.error(f"Invalid timeframe: {timeframe}. Valid options: {list(self.TIMEFRAME_MAP.keys())}")
+            return None
+        
+        # Adjust start date based on timeframe limitations
+        start_date_obj = datetime.strptime(self.start_date, '%Y-%m-%d')
+        end_date_obj = datetime.strptime(self.end_date, '%Y-%m-%d')
+        max_days = self.TIMEFRAME_LIMITS.get(timeframe, 36500)
+        
+        # Calculate the actual start date respecting limitations
+        earliest_start = end_date_obj - timedelta(days=max_days)
+        actual_start = max(start_date_obj, earliest_start)
+        
         for attempt in range(retries):
             try:
-                logger.info(f"Downloading {ticker} (attempt {attempt + 1}/{retries})...")
+                logger.info(f"Downloading {ticker} [{timeframe}] (attempt {attempt + 1}/{retries})...")
                 
-                # Download data from Yahoo Finance
-                data = yf.download(
-                    ticker,
-                    start=self.start_date,
-                    end=self.end_date,
-                    progress=False,
-                    auto_adjust=False  # Keep unadjusted close
-                )
+                # Get yfinance interval
+                yf_interval = self.TIMEFRAME_MAP[timeframe]
+                
+                # For intraday data (15m, 30m, 1h, 4h), yfinance requires 'period' parameter
+                # instead of start/end dates
+                if timeframe in ['15m', '30m', '1h', '4h']:
+                    # Calculate period in days
+                    days_back = min(max_days, 60)  # Max 60 days for intraday
+                    
+                    # Use period parameter for intraday data
+                    data = yf.download(
+                        ticker,
+                        period=f"{days_back}d",
+                        interval=yf_interval,
+                        progress=False,
+                        auto_adjust=False
+                    )
+                elif timeframe == '12h':
+                    # For 12h, download 1d and keep as is (limitation)
+                    data = yf.download(
+                        ticker,
+                        start=actual_start.strftime('%Y-%m-%d'),
+                        end=self.end_date,
+                        interval='1d',
+                        progress=False,
+                        auto_adjust=False
+                    )
+                else:
+                    # For daily and higher timeframes, use start/end dates
+                    data = yf.download(
+                        ticker,
+                        start=actual_start.strftime('%Y-%m-%d'),
+                        end=self.end_date,
+                        interval=yf_interval,
+                        progress=False,
+                        auto_adjust=False
+                    )
                 
                 if data.empty:
-                    logger.warning(f"No data returned for {ticker}")
+                    logger.warning(f"No data returned for {ticker} [{timeframe}]")
                     return None
                 
                 # Flatten multi-level columns if present
@@ -132,115 +213,167 @@ class DataIngestion:
                 # Standardize date column name
                 if 'Date' in data.columns:
                     data.rename(columns={'Date': 'date'}, inplace=True)
-                elif data.index.name == 'Date':
+                elif 'Datetime' in data.columns:
+                    data.rename(columns={'Datetime': 'date'}, inplace=True)
+                elif data.index.name in ['Date', 'Datetime']:
                     data.index.name = 'date'
                     data.reset_index(inplace=True)
                 
-                # Ensure date is datetime (do this once)
+                # Ensure date is datetime
                 data['date'] = pd.to_datetime(data['date'])
                 
-                # Add ticker column (do this after date handling)
+                # Add ticker and timeframe columns
                 data['ticker'] = ticker
+                data['timeframe'] = timeframe
                 
                 # Sort by date
                 data.sort_values('date', inplace=True)
                 
-                logger.info(f"Successfully downloaded {len(data)} rows for {ticker}")
+                logger.info(f"Successfully downloaded {len(data)} rows for {ticker} [{timeframe}]")
                 return data
                 
             except Exception as e:
-                logger.warning(f"Error downloading {ticker} (attempt {attempt + 1}): {e}")
+                logger.warning(f"Error downloading {ticker} [{timeframe}] (attempt {attempt + 1}): {e}")
                 if attempt < retries - 1:
                     time.sleep(delay)
                 else:
-                    logger.error(f"Failed to download {ticker} after {retries} attempts")
+                    logger.error(f"Failed to download {ticker} [{timeframe}] after {retries} attempts")
                     return None
         
         return None
     
-    def save_ticker_data(self, ticker: str, data: pd.DataFrame):
+    def save_ticker_data(self, ticker: str, data: pd.DataFrame, timeframe: str = '1d'):
         """
-        Save ticker data to CSV file.
+        Save ticker data to CSV file in timeframe-specific directory.
         
         Args:
             ticker: Stock ticker symbol
             data: DataFrame with OHLCV data
+            timeframe: Timeframe (15m, 30m, 1h, 4h, 12h, 1d, 1w, 1M)
         """
+        # Create timeframe directory
+        tf_dir = self.output_dir / timeframe
+        tf_dir.mkdir(parents=True, exist_ok=True)
+        
         # Create filename
         filename = f"{ticker}.csv"
-        filepath = self.output_dir / filename
+        filepath = tf_dir / filename
         
         # Ensure date column is string format for consistent CSV storage
         data_to_save = data.copy()
         if 'date' in data_to_save.columns:
-            data_to_save['date'] = pd.to_datetime(data_to_save['date']).dt.strftime('%Y-%m-%d')
+            data_to_save['date'] = pd.to_datetime(data_to_save['date']).dt.strftime('%Y-%m-%d %H:%M:%S')
         
         # Save to CSV
         data_to_save.to_csv(filepath, index=False)
-        logger.info(f"Saved {ticker} data to {filepath}")
+        logger.info(f"Saved {ticker} [{timeframe}] data to {filepath}")
     
     def download_all_tickers(self, 
                             tickers: Optional[List[str]] = None,
+                            timeframes: Optional[List[str]] = None,
                             max_workers: int = 5,
-                            batch_delay: float = 1.0) -> Dict[str, bool]:
+                            batch_delay: float = 1.0,
+                            skip_existing: bool = True) -> Dict[str, Dict[str, str]]:
         """
-        Download data for all tickers (parallelized with rate limiting).
+        Download data for all tickers across multiple timeframes (parallelized with rate limiting).
         
         Args:
             tickers: List of tickers. If None, fetches S&P 500 tickers
+            timeframes: List of timeframes to download. If None, uses instance timeframes
             max_workers: Maximum number of parallel downloads
-            batch_delay: Delay between batches to avoid rate limiting
+            batch_delay: Delay between batches to avoid rate limiting (seconds)
+            skip_existing: Skip downloading if file already exists
             
         Returns:
-            Dictionary mapping ticker to success status
+            Nested dictionary: {timeframe: {ticker: 'downloaded'|'skipped'|'failed'}}
         """
         if tickers is None:
             tickers = self.get_sp500_tickers()
         
-        logger.info(f"Starting download for {len(tickers)} tickers...")
+        if timeframes is None:
+            timeframes = self.timeframes
+        
+        logger.info(f"Starting download for {len(tickers)} tickers across {len(timeframes)} timeframe(s)...")
         
         results = {}
         
-        # Process in batches to avoid overwhelming the API
-        batch_size = max_workers
-        for i in range(0, len(tickers), batch_size):
-            batch = tickers[i:i + batch_size]
+        # Process each timeframe
+        for tf in timeframes:
+            logger.info(f"\n{'='*60}")
+            logger.info(f"Processing timeframe: {tf}")
+            logger.info(f"{'='*60}")
             
-            logger.info(f"Processing batch {i // batch_size + 1}: {len(batch)} tickers")
+            results[tf] = {}
             
-            # Download batch in parallel
-            with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                future_to_ticker = {
-                    executor.submit(self.download_ticker_data, ticker): ticker 
-                    for ticker in batch
-                }
+            # Check which tickers need downloading
+            tickers_to_download = []
+            for ticker in tickers:
+                tf_dir = self.output_dir / tf
+                filepath = tf_dir / f"{ticker}.csv"
                 
-                for future in as_completed(future_to_ticker):
-                    ticker = future_to_ticker[future]
-                    try:
-                        data = future.result()
-                        if data is not None:
-                            self.save_ticker_data(ticker, data)
-                            results[ticker] = True
-                        else:
-                            results[ticker] = False
-                    except Exception as e:
-                        logger.error(f"Unexpected error processing {ticker}: {e}")
-                        results[ticker] = False
+                if skip_existing and filepath.exists():
+                    logger.info(f"Skipping {ticker} [{tf}] - already exists")
+                    results[tf][ticker] = 'skipped'
+                else:
+                    tickers_to_download.append(ticker)
             
-            # Rate limiting delay between batches
-            if i + batch_size < len(tickers):
-                time.sleep(batch_delay)
+            if not tickers_to_download:
+                logger.info(f"All tickers already downloaded for {tf}")
+                continue
+            
+            logger.info(f"Downloading {len(tickers_to_download)} tickers for {tf}...")
+            
+            # Process in batches to avoid overwhelming the API
+            batch_size = max_workers
+            for i in range(0, len(tickers_to_download), batch_size):
+                batch = tickers_to_download[i:i + batch_size]
+                
+                logger.info(f"Processing batch {i // batch_size + 1}/{(len(tickers_to_download) + batch_size - 1) // batch_size}: {len(batch)} tickers")
+                
+                # Download batch in parallel
+                with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    future_to_ticker = {
+                        executor.submit(self.download_ticker_data, ticker, tf): ticker 
+                        for ticker in batch
+                    }
+                    
+                    for future in as_completed(future_to_ticker):
+                        ticker = future_to_ticker[future]
+                        try:
+                            data = future.result()
+                            if data is not None:
+                                self.save_ticker_data(ticker, data, tf)
+                                results[tf][ticker] = 'downloaded'
+                            else:
+                                results[tf][ticker] = 'failed'
+                        except Exception as e:
+                            logger.error(f"Unexpected error processing {ticker} [{tf}]: {e}")
+                            results[tf][ticker] = 'failed'
+                
+                # Rate limiting delay between batches (more aggressive for intraday data)
+                if i + batch_size < len(tickers_to_download):
+                    delay = batch_delay * 2 if tf in ['15m', '30m', '1h'] else batch_delay
+                    logger.info(f"Rate limiting: waiting {delay}s before next batch...")
+                    time.sleep(delay)
         
         # Summary
-        successful = sum(1 for v in results.values() if v)
-        logger.info(f"Download complete: {successful}/{len(tickers)} successful")
+        for tf, tf_results in results.items():
+            successful = sum(1 for v in tf_results.values() if v == 'downloaded')
+            skipped = sum(1 for v in tf_results.values() if v == 'skipped')
+            failed = sum(1 for v in tf_results.values() if v == 'failed')
+            logger.info(f"{tf}: {successful} downloaded, {skipped} skipped, {failed} failed")
         
         # Save summary
-        summary_df = pd.DataFrame([
-            {'ticker': ticker, 'success': success}
-            for ticker, success in results.items()
-        ])
+        summary_data = []
+        for tf, tf_results in results.items():
+            for ticker, status in tf_results.items():
+                summary_data.append({
+                    'ticker': ticker,
+                    'timeframe': tf,
+                    'status': status
+                })
+        
+        summary_df = pd.DataFrame(summary_data)
         summary_path = self.output_dir / 'download_summary.csv'
         summary_df.to_csv(summary_path, index=False)
         logger.info(f"Saved download summary to {summary_path}")

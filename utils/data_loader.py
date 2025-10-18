@@ -15,7 +15,10 @@ class DataLoader:
     """
     Handles loading and organizing data from CSV files.
     Provides efficient access to OHLCV, features, and prediction data.
+    Supports multiple timeframes: 15m, 30m, 1h, 4h, 12h, 1d, 1w, 1M
     """
+    
+    TIMEFRAMES = ['15m', '30m', '1h', '4h', '12h', '1d', '1w', '1M']
     
     def __init__(self, data_root: str = "data"):
         """
@@ -29,20 +32,22 @@ class DataLoader:
         self.features_dir = self.data_root / "processed" / "features"
         self.predictions_dir = self.data_root / "processed" / "predictions"
         
-    def load_ticker_ohlcv(self, ticker: str) -> Optional[pd.DataFrame]:
+    def load_ticker_ohlcv(self, ticker: str, timeframe: str = '1d') -> Optional[pd.DataFrame]:
         """
-        Load OHLCV data for a single ticker.
+        Load OHLCV data for a single ticker at specified timeframe.
         
         Args:
             ticker: Stock ticker symbol
+            timeframe: Timeframe (15m, 30m, 1h, 4h, 12h, 1d, 1w, 1M)
             
         Returns:
             DataFrame with OHLCV data (date-indexed), or None if not found
         """
-        filepath = self.raw_data_dir / f"{ticker}.csv"
+        # Path is now: data/raw/ohlcv/{timeframe}/{ticker}.csv
+        filepath = self.raw_data_dir / timeframe / f"{ticker}.csv"
         
         if not filepath.exists():
-            logger.warning(f"OHLCV data not found for {ticker}")
+            logger.warning(f"OHLCV data not found for {ticker} [{timeframe}]")
             return None
         
         try:
@@ -55,7 +60,7 @@ class DataLoader:
             
             return data
         except Exception as e:
-            logger.error(f"Error loading {ticker}: {e}")
+            logger.error(f"Error loading {ticker} [{timeframe}]: {e}")
             return None
     
     def load_multiple_tickers(self, 
@@ -116,16 +121,35 @@ class DataLoader:
         
         return self.load_multiple_tickers(tickers, combine=combine)
     
-    def get_available_tickers(self) -> List[str]:
+    def get_available_tickers(self, timeframe: str = '1d') -> List[str]:
         """
-        Get list of all available tickers.
+        Get list of all available tickers for a specific timeframe.
         
+        Args:
+            timeframe: Timeframe (15m, 30m, 1h, 4h, 12h, 1d, 1w, 1M)
+            
         Returns:
             List of ticker symbols
         """
-        csv_files = list(self.raw_data_dir.glob('*.csv'))
+        tf_dir = self.raw_data_dir / timeframe
+        if not tf_dir.exists():
+            return []
+        
+        csv_files = list(tf_dir.glob('*.csv'))
         csv_files = [f for f in csv_files if f.stem not in ['sp500_tickers', 'download_summary', 'data_validation_report']]
         return sorted([f.stem for f in csv_files])
+    
+    def get_available_tickers_by_timeframe(self) -> Dict[str, List[str]]:
+        """
+        Get all available tickers grouped by timeframe.
+        
+        Returns:
+            Dictionary mapping timeframe to list of ticker symbols
+        """
+        result = {}
+        for tf in self.TIMEFRAMES:
+            result[tf] = self.get_available_tickers(timeframe=tf)
+        return result
     
     def load_features(self, ticker: str, feature_set: Optional[str] = None) -> Optional[pd.DataFrame]:
         """
