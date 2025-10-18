@@ -378,16 +378,29 @@ def show():
             start_date = datetime(2010, 1, 1)
 
         download_label = f"📥 Download Now ({len(download_targets)} stocks)" if download_targets else "📥 Download Now"
-        key_suffix = ",".join(sorted(download_targets[:5])) if download_targets else "none"
-        mode_suffix = "force" if force_redownload else "fresh"
-        download_key = f"download_btn_{mode_suffix}_{key_suffix}"
+        
+        # Initialize download trigger flag
+        if 'dm_download_triggered' not in st.session_state:
+            st.session_state.dm_download_triggered = False
+            
+        # Callback to trigger download
+        def trigger_download():
+            st.session_state.dm_download_triggered = True
+            st.session_state.dm_download_params = {
+                'download_targets': download_targets.copy(),
+                'start_date': start_date,
+                'end_date': end_date,
+                'max_workers': max_workers,
+                'force_redownload': force_redownload
+            }
 
         download_clicked = st.button(
             download_label,
             type="primary",
             use_container_width=True,
-            key=download_key,
-            disabled=download_disabled
+            key="dm_download_btn_stable",
+            disabled=download_disabled,
+            on_click=trigger_download
         )
 
         if download_disabled:
@@ -396,7 +409,17 @@ def show():
             elif not force_redownload and not selected_not_downloaded:
                 st.caption("All selected tickers already have data. Toggle force re-download to refresh files.")
 
-        if download_clicked:
+        # Check if download was triggered
+        if st.session_state.dm_download_triggered:
+            st.session_state.dm_download_triggered = False  # Reset flag
+            
+            # Get stored parameters
+            params = st.session_state.get('dm_download_params', {})
+            download_targets = params.get('download_targets', [])
+            start_date = params.get('start_date')
+            end_date = params.get('end_date')
+            max_workers = params.get('max_workers', 5)
+            force_redownload = params.get('force_redownload', False)
             with st.spinner(f"Downloading {len(download_targets)} stocks..."):
                 try:
                     ingestion = DataIngestion(
@@ -444,56 +467,19 @@ def show():
                     progress_bar.progress(100)
                     status_text.empty()
 
-                    if successful_tickers:
-                        valid_count = sum(1 for v in validation_results.values() if v.get('is_valid'))
-                        issues = {t: r for t, r in validation_results.items() if not r.get('is_valid')}
-
-                        if failed == 0 and not issues:
-                            st.success(f"✅ Downloaded and validated all {successful} stocks successfully! All data is valid.")
-                        elif failed == 0:
-                            st.warning(f"⚠️ Downloaded {successful} stocks: {valid_count} valid, {len(issues)} with issues")
-                        else:
-                            st.warning(f"⚠️ Downloaded {successful} stocks ({valid_count} valid, {len(issues)} with issues), {failed} failed")
-
-                        if issues:
-                            with st.expander(f"📋 View Detailed Validation Results ({len(issues)} stocks with issues)", expanded=True):
-                                for ticker, result in issues.items():
-                                    st.markdown(f"### 🔍 {ticker}")
-                                    discrepancies = result.get('discrepancies', [])
-                                    if discrepancies:
-                                        st.markdown("**❌ Discrepancies:**")
-                                        for entry in discrepancies:
-                                            st.markdown(f"- {entry}")
-                                    else:
-                                        st.info("No specific discrepancies reported.")
-
-                                    avg_diff = result.get('avg_difference_pct')
-                                    if avg_diff is not None:
-                                        st.write(f"- Average price difference: {avg_diff:.4f}%")
-                                    max_diff = result.get('max_difference_pct')
-                                    if max_diff is not None:
-                                        st.write(f"- Max price difference: {max_diff:.4f}%")
-                                    st.markdown("---")
-
-                        with st.expander(f"📊 View All Validation Details ({len(validation_results)} stocks)", expanded=False):
-                            for ticker, result in validation_results.items():
-                                is_valid = result.get('is_valid', False)
-                                header_icon = "✅" if is_valid else "❌"
-                                st.markdown(f"### {header_icon} {ticker}")
-                                st.write(f"- Quality: {result.get('data_quality', 'UNKNOWN')}")
-                                st.write(f"- Confidence: {result.get('confidence_score', 0.0):.2f}%")
-
-                                discrepancies = result.get('discrepancies', [])
-                                if discrepancies:
-                                    st.write("Discrepancies:")
-                                    for entry in discrepancies:
-                                        st.markdown(f"  - {entry}")
-                                st.markdown("---")
-                    else:
-                        st.warning("⚠️ Download completed but no files were saved. Please check logs.")
-
+                    # Store results in session state for display at the bottom
+                    st.session_state.dm_last_download_results = {
+                        'successful_tickers': successful_tickers,
+                        'validation_results': validation_results,
+                        'failed': failed,
+                        'successful': successful
+                    }
+                    
                     st.session_state.dm_selected_tickers = successful_tickers
                     st.session_state.dm_validation_results.update(validation_results if successful_tickers else {})
+                    
+                    # Trigger rerun to refresh the table with checkmarks
+                    st.rerun()
 
                 except Exception as e:
                     st.error(f"❌ Download error: {e}")
@@ -649,6 +635,70 @@ def show():
                 
                 except Exception as e:
                     st.error(f"❌ Delete error: {e}")
+
+    # Display download results at the bottom if available
+    if 'dm_last_download_results' in st.session_state and st.session_state.dm_last_download_results:
+        st.markdown("---")
+        st.markdown("### 📊 Last Download Results")
+        
+        results = st.session_state.dm_last_download_results
+        successful_tickers = results.get('successful_tickers', [])
+        validation_results = results.get('validation_results', {})
+        failed = results.get('failed', 0)
+        successful = results.get('successful', 0)
+        
+        if successful_tickers:
+            valid_count = sum(1 for v in validation_results.values() if v.get('is_valid'))
+            issues = {t: r for t, r in validation_results.items() if not r.get('is_valid')}
+
+            if failed == 0 and not issues:
+                st.success(f"✅ Downloaded and validated all {successful} stocks successfully! All data is valid.")
+            elif failed == 0:
+                st.warning(f"⚠️ Downloaded {successful} stocks: {valid_count} valid, {len(issues)} with issues")
+            else:
+                st.warning(f"⚠️ Downloaded {successful} stocks ({valid_count} valid, {len(issues)} with issues), {failed} failed")
+
+            if issues:
+                with st.expander(f"📋 View Detailed Validation Results ({len(issues)} stocks with issues)", expanded=False):
+                    for ticker, result in issues.items():
+                        st.markdown(f"### 🔍 {ticker}")
+                        discrepancies = result.get('discrepancies', [])
+                        if discrepancies:
+                            st.markdown("**❌ Discrepancies:**")
+                            for entry in discrepancies:
+                                st.markdown(f"- {entry}")
+                        else:
+                            st.info("No specific discrepancies reported.")
+
+                        avg_diff = result.get('avg_difference_pct')
+                        if avg_diff is not None:
+                            st.write(f"- Average price difference: {avg_diff:.4f}%")
+                        max_diff = result.get('max_difference_pct')
+                        if max_diff is not None:
+                            st.write(f"- Max price difference: {max_diff:.4f}%")
+                        st.markdown("---")
+
+            with st.expander(f"📊 View All Validation Details ({len(validation_results)} stocks)", expanded=False):
+                for ticker, result in validation_results.items():
+                    is_valid = result.get('is_valid', False)
+                    header_icon = "✅" if is_valid else "❌"
+                    st.markdown(f"### {header_icon} {ticker}")
+                    st.write(f"- Quality: {result.get('data_quality', 'UNKNOWN')}")
+                    st.write(f"- Confidence: {result.get('confidence_score', 0.0):.2f}%")
+
+                    discrepancies = result.get('discrepancies', [])
+                    if discrepancies:
+                        st.write("Discrepancies:")
+                        for entry in discrepancies:
+                            st.markdown(f"  - {entry}")
+                    st.markdown("---")
+        else:
+            st.warning("⚠️ Download completed but no files were saved. Please check logs.")
+        
+        # Add button to clear results
+        if st.button("🔄 Clear Results", key="clear_download_results"):
+            st.session_state.dm_last_download_results = None
+            st.rerun()
 
     if selected_count == 0:
         st.info("💡 **Tip:** Select stocks using checkboxes or bulk actions to download/manage data.")
