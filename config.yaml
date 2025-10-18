@@ -1,0 +1,301 @@
+# QuantSearch Trading Strategy Research Platform
+# Configuration File
+
+# =============================================================================
+# PATH CONFIGURATION
+# =============================================================================
+paths:
+  # Root data directory
+  data_root: "data"
+  
+  # Raw data storage
+  raw_data: "data/raw/ohlcv"
+  
+  # Processed data storage
+  processed_features: "data/processed/features"
+  processed_predictions: "data/processed/predictions"
+  
+  # Strategy templates
+  strategies: "strategies"
+  strategy_templates: "strategies/templates"
+  
+  # Model storage
+  models: "models"
+  saved_models: "models/saved"
+  
+  # Backtest results
+  backtest_results: "backtest/results"
+
+# =============================================================================
+# DATA INGESTION CONFIGURATION
+# =============================================================================
+data:
+  # Data source
+  source: "yfinance"  # yfinance, alpha_vantage, etc.
+  
+  # Date range for historical data
+  start_date: "2010-01-01"
+  end_date: null  # null = today
+  
+  # Update frequency
+  update_frequency: "daily"  # daily, weekly, monthly
+  
+  # S&P 500 configuration
+  sp500:
+    use_current_constituents: true
+    max_stocks: null  # null = all stocks
+    
+  # Data validation
+  min_data_points: 252  # Minimum trading days required
+  max_missing_pct: 0.10  # Max 10% missing data allowed
+  
+  # Multi-source validation
+  validation:
+    providers:
+      yfinance:
+        enabled: true
+        priority: 1  # Lower = higher priority
+      alpha_vantage:
+        enabled: false  # Disabled - rate limit 25 calls/day
+        api_key: "FOY8J7KM3ZKCCEAL"
+        priority: 2
+        rate_limit: 25  # calls per day on free tier
+      polygon:
+        enabled: false  # Disabled - rate limit 5 calls/min (too restrictive)
+        api_key: "lFksH9o5i6bPcAGZgxzMHm4hxdEGO6Nj"
+        priority: 3
+        rate_limit: 5  # calls per minute on free tier
+      finnhub:
+        enabled: false  # Disabled - Free tier doesn't include historical candles (Premium only)
+        api_key: "d3omf6pr01quo6o51c60d3omf6pr01quo6o51c6g"
+        priority: 4
+        rate_limit: 60  # calls per minute on free tier
+      twelve_data:
+        enabled: true  # 800 calls/day free tier with historical OHLC data
+        api_key: "afb93fab6f1f4e22a11cb7851cd6726c"  # Get free key at https://twelvedata.com/
+        priority: 2
+        rate_limit: 800  # calls per day on free tier (8 calls/min)
+    
+    # Consensus settings
+    min_providers: 2  # Minimum providers that must agree
+    consensus_threshold: 0.01  # 1% - max allowed difference between providers
+    tolerance: 0.02  # 2% - default validation tolerance
+    
+    # Validation window
+    lookback_days: 10  # Days of historical data to validate
+    min_dates_checked: 3  # Minimum trading days to check
+
+# =============================================================================
+# FEATURE ENGINEERING CONFIGURATION
+# =============================================================================
+features:
+  # Technical indicators
+  technical:
+    - name: "sma"
+      periods: [20, 50, 200]
+    - name: "ema"
+      periods: [12, 26]
+    - name: "rsi"
+      period: 14
+    - name: "macd"
+      fast: 12
+      slow: 26
+      signal: 9
+    - name: "bollinger_bands"
+      period: 20
+      std: 2
+    - name: "atr"
+      period: 14
+    - name: "adx"
+      period: 14
+    - name: "stochastic"
+      k_period: 14
+      d_period: 3
+  
+  # Fundamental features (if available)
+  fundamental:
+    enabled: false
+    features: ["pe_ratio", "market_cap", "revenue_growth"]
+  
+  # Sentiment features (if available)
+  sentiment:
+    enabled: false
+    features: ["news_sentiment", "social_sentiment"]
+  
+  # Target variable configuration
+  target:
+    name: "forward_return"
+    horizon: 21  # days (approximately 1 month)
+    type: "log_return"  # log_return, simple_return
+
+# =============================================================================
+# MODEL CONFIGURATION
+# =============================================================================
+models:
+  # Default model type
+  default_model: "lightgbm"  # lightgbm, xgboost, catboost
+  
+  # Walk-forward validation
+  walk_forward:
+    train_period_months: 36  # 3 years
+    test_period_months: 1    # 1 month
+    expanding_window: true   # true = expanding, false = rolling
+    min_train_samples: 1000
+  
+  # LightGBM parameters
+  lightgbm:
+    objective: "regression"
+    metric: "mae"
+    num_leaves: 31
+    learning_rate: 0.05
+    n_estimators: 200
+    max_depth: -1
+    min_child_samples: 20
+    subsample: 0.8
+    colsample_bytree: 0.8
+    reg_alpha: 0.1
+    reg_lambda: 0.1
+    random_state: 42
+    n_jobs: -1
+    verbose: -1
+  
+  # XGBoost parameters
+  xgboost:
+    objective: "reg:squarederror"
+    eval_metric: "mae"
+    max_depth: 6
+    learning_rate: 0.05
+    n_estimators: 200
+    subsample: 0.8
+    colsample_bytree: 0.8
+    reg_alpha: 0.1
+    reg_lambda: 0.1
+    random_state: 42
+    n_jobs: -1
+  
+  # Feature selection
+  feature_selection:
+    enabled: true
+    method: "importance"  # importance, correlation, recursive
+    threshold: 0.01  # Minimum importance threshold
+  
+  # Model evaluation metrics
+  evaluation_metrics:
+    - "mae"
+    - "rmse"
+    - "r2"
+    - "spearman"
+    - "ic"  # Information coefficient
+
+# =============================================================================
+# STRATEGY CONFIGURATION
+# =============================================================================
+strategy:
+  # Strategy execution
+  rebalance_frequency: "monthly"  # daily, weekly, monthly
+  execution_delay: 1  # T+1 execution (days)
+  
+  # Portfolio construction
+  portfolio:
+    max_positions: 20
+    min_positions: 5
+    max_position_weight: 0.10  # 10% max per position
+    equal_weight: false  # false = risk-adjusted weighting
+    
+  # Risk management
+  risk:
+    target_volatility: 0.15  # 15% annualized
+    max_drawdown_limit: 0.20  # 20% max drawdown
+    leverage: 1.0  # No leverage by default
+    
+  # Filters
+  filters:
+    min_liquidity_rank: 0.5  # Top 50% by liquidity
+    max_volatility: 0.50  # 50% annualized
+    exclude_missing_sentiment: false
+    
+  # Weighting scheme
+  weighting:
+    method: "risk_adjusted"  # equal, risk_adjusted, prediction_confidence
+    confidence_scaling: true
+    volatility_scaling: true
+    
+  # Turnover constraints
+  turnover:
+    max_monthly_turnover: 0.50  # 50% max turnover per month
+    min_holding_period_days: 5
+
+# =============================================================================
+# BACKTESTING CONFIGURATION
+# =============================================================================
+backtest:
+  # Initial capital
+  initial_capital: 1000000  # $1M
+  
+  # Transaction costs
+  costs:
+    commission_pct: 0.001  # 0.1% commission
+    slippage_bps: 5  # 5 basis points slippage
+    
+  # Execution
+  execution:
+    timing: "close"  # close, open, vwap
+    partial_fills: false
+    
+  # Performance metrics
+  metrics:
+    risk_free_rate: 0.02  # 2% annual risk-free rate
+    benchmark: "SPY"  # Benchmark ticker
+    
+  # Reporting
+  reporting:
+    rolling_window_days: 252  # 1 year rolling metrics
+    export_trades: true
+    export_positions: true
+    export_daily_stats: true
+
+# =============================================================================
+# DASHBOARD CONFIGURATION
+# =============================================================================
+dashboard:
+  # Streamlit settings
+  title: "QuantSearch - Trading Strategy Research Platform"
+  layout: "wide"
+  sidebar_state: "expanded"
+  
+  # Refresh intervals
+  refresh_interval_seconds: 300  # 5 minutes
+  
+  # Visualization
+  charts:
+    default_height: 400
+    color_scheme: "plotly"  # plotly, seaborn
+    show_drawdown: true
+    show_rolling_metrics: true
+    
+  # Data display
+  max_table_rows: 100
+  decimal_places: 4
+
+# =============================================================================
+# LOGGING CONFIGURATION
+# =============================================================================
+logging:
+  level: "INFO"  # DEBUG, INFO, WARNING, ERROR
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  log_file: "logs/quantsearch.log"
+  max_file_size_mb: 10
+  backup_count: 5
+
+# =============================================================================
+# SYSTEM CONFIGURATION
+# =============================================================================
+system:
+  # Parallel processing
+  n_jobs: -1  # -1 = use all cores
+  
+  # Memory management
+  chunk_size: 10000  # Rows per chunk for large datasets
+  
+  # Random seed
+  random_seed: 42

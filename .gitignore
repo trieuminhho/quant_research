@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Project specific
+.states/
+.web/
+assets/external/
+*.db
+logs/*.log
+logs/
+!logs/.gitkeep
+
+# Downloaded datasets and artifacts
+data/**/*.csv
+data/**/*.json
+data/**/*.parquet
+backtest/results/
+models/saved/
+*.csv
+*.json
+*.parquet
+!data/**/.gitkeep
+!backtest/results/.gitkeep
+!models/saved/.gitkeep
+
+# Streamlit
+.streamlit/secrets.toml
+
+# Data (optional - uncomment if you want to ignore data files)
+# data/raw/
+# data/processed/
